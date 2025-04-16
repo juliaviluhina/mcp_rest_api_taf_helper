@@ -1,0 +1,12 @@
+[project]
+name = "github-review-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.11.16",
+    "httpx>=0.28.1",
+    "mcp[cli]>=1.6.0",
+    "pygithub>=2.6.1",
+]
