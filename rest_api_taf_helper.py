@@ -9,15 +9,16 @@ import httpx
 
 from github import Github, Repository
 from mcp.server.fastmcp import FastMCP, Context
+from prompt_executor import PromptExecutor
 
 from dotenv import load_dotenv
-
 
 load_dotenv()
 
 @dataclass
 class AppContext:
     github_client: Github
+    prompt_executor: PromptExecutor 
     repo: Optional[Repository.Repository] = None
     swagger_json: Optional[Dict[str, Any]] = None 
     service_name: Optional[str] = None
@@ -33,9 +34,14 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     
     # Initialize GitHub client
     github_client = Github(github_token)
+    # Initialize prompt executor
+    prompt_executor = PromptExecutor()
     
     # Create and return the context
-    context = AppContext(github_client=github_client)
+    context = AppContext(
+        github_client=github_client,
+        prompt_executor=prompt_executor
+    )
     try:
         yield context
     finally:
@@ -45,7 +51,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 # Configure the MCP server with lifespan
 mcp = FastMCP("SpeedUp REST API test automation", 
               lifespan=app_lifespan, 
-              dependencies=["pygithub", "httpx"])
+              dependencies=["pygithub", "httpx", "anthropic"])
 
 # Repository connection tool
 @mcp.tool()
@@ -171,12 +177,8 @@ async def generate_typescript_dtos(ctx: Context) -> str:
         
         # Generate DTO for each schema using prompt
         for schema_name, schema_def in schemas.items():
-            # Use the generate_dto_prompt to create TypeScript class
-            dto_content = await generate_dto_prompt(
-                ctx, 
-                schema_name=schema_name, 
-                schema_def=schema_def
-            )
+            # Call the MCP prompt to generate the TypeScript DTO
+            dto_content = await app_ctx.prompt_executor.execute_prompt(generate_typescript_dto(schema_name, json.dumps(schema_def, indent=2)))
             
             # Store the generated DTO
             generated_dtos.append({
@@ -262,58 +264,37 @@ async def prepare_dto_for_push(ctx: Context) -> dict:
         return {"error": f"Unexpected error: {str(e)}"}
 
 @mcp.prompt()
-async def generate_dto_prompt(
-    ctx: Context, 
-    schema_name: str, 
-    schema_def: Dict[str, Any]
-) -> str:
-    """Generate a DTO class based on schema definition"""
+def generate_typescript_dto(schema_name: str, schema_definition: str) -> str:
+    """
+    Generate a TypeScript DTO class for a given schema.
     
-    # Convert schema definition to a string representation
-    schema_json = json.dumps(schema_def, indent=2)
+    Args:
+        schema_name: Name of the schema
+        schema_definition: Schema definition from Swagger/OpenAPI as JSON string
+        
+    Returns:
+        TypeScript class definition as a string
+    """
+    return f"""
+    You are a TypeScript expert. Your task is to convert the following OpenAPI/Swagger schema definition into a TypeScript DTO class.
     
-    # Detailed prompt for TypeScript class generation
-    prompt = f"""Generate a TypeScript enum or interface for the following schema:
-
     Schema Name: {schema_name}
-
-    Guidelines:
-
-    - Create a TypeScript enum or interface
-    - Generated enum or interface shoud be marked as 'export'
-    - Use PascalCase for the class name
-    - Include proper type annotations
-    - Handle optional properties
-    - Add JSDoc comments if possible
-    - Ensure the class represents the schema's structure accurately
-    - Such enums and classes will be used as DTOs in a REST API
-
     Schema Definition:
     ```json
-    {schema_json}
+    {schema_definition}
     ```
-    Generated TypeScript Code:"""
-
-    generated_dto = await ctx.generate(prompt)
     
-    if not generated_dto.strip():
-        await ctx.warn(f"Empty TypeScript content generated for {schema_name}")
-        return f"// Warning: Empty content for {schema_name}\nexport interface {schema_name} {{}}"
-    elif not "export" in generated_dto:
-        await ctx.warn(f"Generated content for {schema_name} may be missing export keyword")
-        # Fix it rather than just warning
-        generated_dto = f"export {generated_dto}"
-    elif not any(keyword in generated_dto for keyword in ["interface", "enum", "type", "class"]):
-        await ctx.warn(f"Generated content for {schema_name} doesn't seem to be a TypeScript type definition")
-        # Still include it but with a warning comment
-        generated_dto = f"// Warning: This might not be valid TypeScript\n{generated_dto}"
-    # Add validation for braces if it's an interface (simple check)
-    if "interface" in generated_dto and not "{" in generated_dto:
-        await ctx.warn(f"Generated interface for {schema_name} appears to be missing braces")
-        generated_dto = f"{generated_dto.rstrip()} {{}}"
-
-    return generated_dto
-
+    Follow these guidelines:
+    1. Create a class with appropriate properties based on the schema
+    2. Use proper TypeScript types based on the schema types
+    3. Include JSDoc comments for properties using descriptions from the schema
+    4. Handle required vs optional properties correctly (use ? for optional properties)
+    5. Handle references to other schemas
+    6. Handle arrays, enums, and nested objects appropriately
+    7. Return ONLY the TypeScript code, nothing else
+    
+    The output should be a TypeScript class that represents this schema.
+    """
 
 if __name__ == "__main__":
     mcp.run()
