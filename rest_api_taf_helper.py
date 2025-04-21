@@ -1,290 +1,159 @@
-# rest_api_taf_helper.py
 import os
-from dataclasses import dataclass
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
-from typing import Optional, Dict, Any
-import json
-import httpx
-
-from github import Github, Repository
-from mcp.server.fastmcp import FastMCP, Context
-from prompt_executor import PromptExecutor
-
+from mcp.server.fastmcp import FastMCP
+from pydantic import Field
+from src.github_utils import read_nested_json_section
+from src.github_utils import read_text_file_contents
+from src.github_utils import get_service_schemas
 from dotenv import load_dotenv
+from dataclasses import dataclass
 
 load_dotenv()
 
 @dataclass
 class AppContext:
-    github_client: Github
-    prompt_executor: PromptExecutor 
-    repo: Optional[Repository.Repository] = None
-    swagger_json: Optional[Dict[str, Any]] = None 
-    service_name: Optional[str] = None
-    generated_typescript_dto: Optional[Dict[str, str]] = None 
+    repository_owner: str
+    repository_name: str
+    service_name: str
 
-@asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Initialize GitHub and Brave Search connections"""
-    # Get GitHub token from environment
-    github_token = os.environ.get("GITHUB_TOKEN")
-    if not github_token:
-        raise ValueError("GITHUB_TOKEN environment variable is required")
-    
-    # Initialize GitHub client
-    github_client = Github(github_token)
-    # Initialize prompt executor
-    prompt_executor = PromptExecutor()
-    
-    # Create and return the context
-    context = AppContext(
-        github_client=github_client,
-        prompt_executor=prompt_executor
-    )
-    try:
-        yield context
-    finally:
-        # Cleanup
-        github_client.close()
+mcp_server_name = "SpeedUp REST API test automation"
+app_context: AppContext = AppContext(
+        repository_owner = os.environ.get("GITHUB_REPO_OWNER"),
+        repository_name = os.environ.get("GITHUB_REPO_NAME"),
+        service_name = '')
 
 # Configure the MCP server with lifespan
-mcp = FastMCP("SpeedUp REST API test automation", 
-              lifespan=app_lifespan, 
-              dependencies=["pygithub", "httpx", "anthropic"])
+mcp = FastMCP(mcp_server_name)
 
-# Repository connection tool
+@mcp.resource("config://context")
+def get_config() -> str:
+    """Repository owner, repository name, service name"""
+    return f"MCP server works with context: {app_context}"
+
 @mcp.tool()
-async def connect_to_repo(ctx: Context, owner: str, repo_name: str) -> str:
+def configure_flow(repository_owner: str, repository_name: str, service_name:str) -> str:
     """
-    Connect to a GitHub repository.
+    Tool that helps with flow configuration: user can configure repository name, owner and service name
     
     Args:
-        owner: GitHub username or organization
-        repo_name: Repository name
-    """
-    app_ctx = ctx.request_context.lifespan_context
-    
-    try:
-        repo = app_ctx.github_client.get_repo(f"{owner}/{repo_name}")
-        app_ctx.repo = repo
-        return f"Connected to {owner}/{repo_name}"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
-@mcp.tool()
-async def read_swagger_json(ctx: Context, folder_path: str, service_name: str) -> str:  # Note: return type is str
-    """
-    Read and parse a Swagger/OpenAPI JSON file from a specific folder in the repository.
-    Store the parsed JSON in the context for later use.
-    Validate the Swagger/OpenAPI contract.
-    If the file is not found or is invalid, return an error message.
-    
-    Args:
-        folder_path: path to folder in the GitHub reposiory
-        service_name: Service name which swagger json file belongs to
+        repository_owner: Owner name of repository which is used for user's requests
+        repository_name: repository name which is used for user's requests
+        service_name: service name which is used for user's requests
 
     Returns:
-        str: Success message or error message
+        updated configuration    
     """
-    try:
-        # Validate repository connection
-        app_ctx = ctx.request_context.lifespan_context
-        if not app_ctx.repo:
-            return "Error: No repository connected. Use connect_to_repo first."
-        
-        # Construct full file path
-        full_file_path = f"{folder_path.rstrip('/')}/{service_name}.json"
-        
-        # Log the file reading attempt
-        await ctx.info(f"Attempting to read Swagger JSON from: {full_file_path}")
-        
-        # Retrieve file contents
-        try:
-            content_file = app_ctx.repo.get_contents(full_file_path)
-        except Exception:
-            return f"Error: Could not retrieve file: {full_file_path}"
-        
-        # Verify it's a file, not a directory
-        if isinstance(content_file, list):
-            return f"Error: {full_file_path} is a directory, not a file"
-        
-        # Decode file content
-        try:
-            file_content = content_file.decoded_content.decode('utf-8')
-        except UnicodeDecodeError:
-            return f"Error: Unable to decode file content at {full_file_path}"
-        
-        # Parse JSON
-        try:
-            swagger_json = json.loads(file_content)
-        except json.JSONDecodeError:
-            return f"Error: Invalid JSON in file {full_file_path}"
-        
-        # Validate Swagger/OpenAPI contract
-        if not ('swagger' in swagger_json or 'openapi' in swagger_json):
-            return f"Error: Invalid Swagger/OpenAPI definition at {full_file_path}"
-        
-        # Store the swagger json in context
-        app_ctx.swagger_json = swagger_json
-        app_ctx.service_name = service_name
-        
-        return "Swagger JSON is successfully found and stored to context"
-    
-    except Exception as e:
-        # Catch-all for any unexpected errors
-        await ctx.error(f"Unexpected error reading Swagger JSON: {str(e)}")
-        return f"Error: Unexpected error - {str(e)}"
+    app_context.repository_owner = repository_owner
+    app_context.repository_name = repository_name
+    app_context.service_name = service_name
 
+    return f"MCP server works with context: {app_context}"   
 
 @mcp.tool()
-async def generate_typescript_dtos(ctx: Context) -> str:
+def generate_typescript_dto() -> str:
     """
-    Generate TypeScript DTO classes based on previously retrieved Swagger JSON, using prompts
-    Generate path to the TypeScript DTO module, which will be used in the codebase
-    Store the generated DTOs and path in the context for later use.
-    
-    Args:
-        ctx: Context object
+    Tool that returns prompt for further execution, to generate TypeScript module with DTOs
     
     Returns:
-        str: Status message or error description
-    """
-    try:
-        # Retrieve Swagger JSON from context
-        app_ctx = ctx.request_context.lifespan_context
-
-        if not app_ctx.swagger_json:
-            return "Error: No swagger JSON read. Use read_swagger_json first."
-        if not app_ctx.service_name:
-            return "Error: No service name stored for flow. Use read_swagger_json first."    
-        
-        swagger_json = app_ctx.swagger_json
-        
-        # Determine schema location based on Swagger/OpenAPI version
-        if 'components' in swagger_json and 'schemas' in swagger_json['components']:
-            # OpenAPI 3.x
-            schemas = swagger_json['components']['schemas']
-        elif 'definitions' in swagger_json:
-            # Swagger 2.0
-            schemas = swagger_json['definitions']
-        else:
-            return "Error: No schemas found in the Swagger/OpenAPI specification"
-        
-        # Prepare to collect generated DTOs
-        generated_dtos = []
-        
-        # Generate DTO for each schema using prompt
-        for schema_name, schema_def in schemas.items():
-            # Call the MCP prompt to generate the TypeScript DTO
-            dto_content = await app_ctx.prompt_executor.execute_prompt(generate_typescript_dto(schema_name, json.dumps(schema_def, indent=2)))
-            
-            # Store the generated DTO
-            generated_dtos.append({
-                'name': schema_name,
-                'content': dto_content
-            })
-        
-        # Combine DTOs into a single module
-        typescript_module = f"// Generated TypeScript DTOs for {app_ctx.service_name}\n\n"
-        typescript_module += "\n".join(dto['content'] for dto in generated_dtos)
-        file_path = f"/src/models/{app_ctx.service_name}.model.ts"
-        
-        # Store information in context
-        app_ctx.generated_typescript_dto = {
-            'content': typescript_module,
-            'path': file_path
-        }
-        
-        return f"Successfully generated TypeScript DTO module for further actions: {file_path}"
-    
-    except Exception as e:
-        return f"Error generating TypeScript DTOs: {str(e)}"
-
-@mcp.tool()
-async def inspect_context(ctx: Context, attribute: Optional[str] = None) -> str:
-    """
-    Inspect the current application context.
-    
-    Args:
-        attribute: Optional specific attribute to inspect
-    
-    Returns:
-        str: Formatted context information
-    """
-    app_ctx = ctx.request_context.lifespan_context
-    
-    if not attribute:
-        # If no specific attribute, return all available attributes
-        context_info = {}
-        for attr_name in ['repo', 'swagger_json', 'service_name', 'generated_typescript_dto']:
-            value = getattr(app_ctx, attr_name, None)
-            if value is not None:
-                context_info[attr_name] = (
-                    str(type(value)) if not isinstance(value, (dict, str, int, list)) 
-                    else value
-                )
-        
-        return json.dumps(context_info, indent=2)
-    
-    # If specific attribute is requested
-    try:
-        value = getattr(app_ctx, attribute)
-        return json.dumps(value, indent=2) if value is not None else "Attribute is None"
-    except AttributeError:
-        return f"Error: Attribute '{attribute}' not found in context"      
-
-@mcp.tool()
-async def prepare_dto_for_push(ctx: Context) -> dict:
-    """
-    Prepare context for DTO push
-    
-    Returns:
-        dict: Context information for DTO push
-    """
-    try:
-        app_ctx = ctx.request_context.lifespan_context
-        
-        # Validate required context
-        if not app_ctx.repo:
-            return {"error": "No repository connected"}
-        if not app_ctx.generated_typescript_dto:
-            return {"error": "No generated DTO found"}
-        
-        return {
-            "repo_full_name": f"{app_ctx.repo.owner.login}/{app_ctx.repo.name}",
-            "service_name": app_ctx.service_name,
-            "file_path": app_ctx.generated_typescript_dto['path'],
-            "file_content": app_ctx.generated_typescript_dto['content'],
-            "default_branch": app_ctx.repo.default_branch
-        }
-    
-    except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
+        prompt for further run    
+    """    
+    return run_step1_generate_typescript_dto()
 
 @mcp.prompt()
-def generate_typescript_dto(schema_name: str, schema_definition: str) -> str:
+def step0_configure_flow(
+    repository_owner: str = Field(description="Owner name of GitHub repository which is used"),
+    repository_name: str = Field(description="Repository name of GitHub repository which is used"),
+    service_name: str = Field(description="Service name which is under test implementation")) -> str:
     """
-    Generate a TypeScript DTO class for a given schema.
+    Prompt to store configuration for this MCP server
     
     Args:
-        schema_name: Name of the schema
-        schema_definition: Schema definition from Swagger/OpenAPI as JSON string
+        repository_owner: Owner name of repository which is used for user's requests
+        repository_name: repository name which is used for user's requests
+        service_name: service name which is used for user's requests
         
     Returns:
-        TypeScript class definition as a string
+        Prompt to process this request
     """
+
     return f"""
-    You are a TypeScript expert. Your task is to convert the following OpenAPI/Swagger schema definition into a TypeScript DTO class.
+    Use 'configure_flow' tool of '{mcp_server_name}' MCP server to set configuration
+
+        repository_owner = {repository_owner}
+        repository_name = {repository_name}
+        service_name: {service_name}
+        
+    """
+
+@mcp.prompt()
+def step1_generate_typescript_dto() -> str:
+    """
+    Prompt to generate TypeScript module with DTOs for each data item used in service with service_name 
     
-    Schema Name: {schema_name}
-    Schema Definition:
-    ```json
-    {schema_definition}
-    ```
+    Returns:
+        Prompt to process this request
+    """
+    return run_step1_generate_typescript_dto()
+
+def run_step1_generate_typescript_dto() -> str:
+    """
+    Prompt to generate TypeScript module with DTOs for each data item used in service with service_name 
     
-    Follow these guidelines:
+    Returns:
+        Prompt to process this request
+    """
+    # Assumptions: 
+    #     - test framework is built based on specific template, with approved structure
+    #     - test framework already contains example for each layer of the test framework
+    service_name = app_context.service_name
+    owner = app_context.repository_owner
+    repo = app_context.repository_name
+    if (repo == ""):
+        return "Error: Repository name is not defined. Use step0_configure_flow to configure flow."
+    if (owner == ""):
+        return "Error: Repository owner is not defined. Use step0_configure_flow to configure flow."
+    if (service_name == ""):
+        return "Error: Service name is not defined. Use step0_configure_flow to configure flow."
+
+    example_service_name = "wizardWorld"
+    path_to_exapmpe_contract = "serviceContracts/wizardWorld.json"
+    path_to_example_dto = "src/models/wizardWorld.model.ts"
+
+    schema = ''
+    example_schema = ''
+
+    try:
+        schema = get_service_schemas(owner, repo, service_name)
+    except Exception as e:
+        return f"Error reading serviceContracts/{service_name}.json: {str(e)}"  
+                     
+    try:
+        example_schema = read_nested_json_section(owner, repo,  path_to_exapmpe_contract, ['components', 'schemas'])
+    except Exception as e:
+        return f"Error reading {path_to_exapmpe_contract}: {str(e)}" 
+
+    try:
+        example_dto_module = read_text_file_contents(owner, repo,  path_to_example_dto)
+    except Exception as e:
+        return f"Error reading {path_to_example_dto}: {str(e)}"     
+
+    return f"""
+    You are test automation engineer with expertise in REST API test automation, Swagger, TypeScript. 
+    Your task is to analyse the following OpenAPI/Swagger schema definition, and generate TypeScript module with DTOs for each data class mentioned in the schema definition.
+    
+    <schema_for_analysis>
+    {schema}
+    </schema_for_analysis>
+    
+    Use example and guidelines below to generate Typescript module
+    <example_schema>
+    {example_schema}
+    </example_schema>
+
+    <example_dto_module>
+    {example_dto_module}
+    <example_dto_module>
+
+    <guidelines>
     1. Create a class with appropriate properties based on the schema
     2. Use proper TypeScript types based on the schema types
     3. Include JSDoc comments for properties using descriptions from the schema
@@ -292,9 +161,19 @@ def generate_typescript_dto(schema_name: str, schema_definition: str) -> str:
     5. Handle references to other schemas
     6. Handle arrays, enums, and nested objects appropriately
     7. Return ONLY the TypeScript code, nothing else
-    
-    The output should be a TypeScript class that represents this schema.
+    8. Return result to chat for user's review
+    9. Ask whether user would like to review and adjust module, or push changes to repository
+    10. For further push to repository, strictly follow steps: 
+        10.1. use 'github' tool, 
+        10.2. for repository '{owner}/{repo}, 
+        10.3. create branch dto_{service_name}, 
+        10.4. store prepared TypeScript module as src/models/{service_name}.model.ts
+        10.5. raise PR
+        10.6. inform user about result
+    </guidelines>
+        
     """
+
 
 if __name__ == "__main__":
     mcp.run()

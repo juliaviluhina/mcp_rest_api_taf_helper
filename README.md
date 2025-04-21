@@ -26,7 +26,7 @@ uv venv
 source .venv/bin/activate
 
 # Install dependencies
-uv add "mcp[cli]" httpx PyGithub python-dotenv aiohttp anthropic
+uv add "mcp[cli]" pydantic pygithub
 ```
 
 ### 2. Configure GitHub Access
@@ -56,8 +56,7 @@ Add the MCP server configuration to your Claude desktop settings:
         "cd /path/to/swagger-dto-generator && source .venv/bin/activate && mcp run rest_api_taf_helper.py"
       ],
       "env": {
-            "GITHUB_TOKEN":"your_github_personal_access_token",
-            "ANTHROPIC_API_KEY":"your_anthropic_api_key"
+            "GITHUB_TOKEN":"your_github_personal_access_token"
       }  
     }
   }
