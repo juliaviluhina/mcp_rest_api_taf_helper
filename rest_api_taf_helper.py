@@ -5,36 +5,121 @@ from src.github_utils import read_nested_json_section
 from src.github_utils import read_text_file_contents
 from src.github_utils import get_service_schemas
 from dotenv import load_dotenv
+from dataclasses import dataclass
 
 load_dotenv()
 
+@dataclass
+class AppContext:
+    repository_owner: str
+    repository_name: str
+    service_name: str
+
+mcp_server_name = "SpeedUp REST API test automation"
+app_context: AppContext = AppContext(
+        repository_owner = os.environ.get("GITHUB_REPO_OWNER"),
+        repository_name = os.environ.get("GITHUB_REPO_NAME"),
+        service_name = '')
+
 # Configure the MCP server with lifespan
-mcp = FastMCP("SpeedUp REST API test automation")
+mcp = FastMCP(mcp_server_name)
+
+@mcp.resource("config://context")
+def get_config() -> str:
+    """Repository owner, repository name, service name"""
+    return f"MCP server works with context: {app_context}"
+
+@mcp.tool()
+def configure_flow(repository_owner: str, repository_name: str, service_name:str) -> str:
+    """
+    Tool that helps with flow configuration: user can configure repository name, owner and service name
+    
+    Args:
+        repository_owner: Owner name of repository which is used for user's requests
+        repository_name: repository name which is used for user's requests
+        service_name: service name which is used for user's requests
+
+    Returns:
+        updated configuration    
+    """
+    app_context.repository_owner = repository_owner
+    app_context.repository_name = repository_name
+    app_context.service_name = service_name
+
+    return f"MCP server works with context: {app_context}"   
+
+@mcp.tool()
+def generate_typescript_dto() -> str:
+    """
+    Tool that returns prompt for further execution, to generate TypeScript module with DTOs
+    
+    Returns:
+        prompt for further run    
+    """    
+    return run_step1_generate_typescript_dto()
 
 @mcp.prompt()
-def step1_generate_typescript_dto(
+def step0_configure_flow(
+    repository_owner: str = Field(description="Owner name of GitHub repository which is used"),
+    repository_name: str = Field(description="Repository name of GitHub repository which is used"),
     service_name: str = Field(description="Service name which is under test implementation")) -> str:
     """
-    Prompt to generate TypeScript module with DTOs for each data item used in service with service_name 
-
+    Prompt to store configuration for this MCP server
+    
     Args:
-        service_name: Service name which is under analysis for DTO generation
+        repository_owner: Owner name of repository which is used for user's requests
+        repository_name: repository name which is used for user's requests
+        service_name: service name which is used for user's requests
         
+    Returns:
+        Prompt to process this request
+    """
+
+    return f"""
+    Use 'configure_flow' tool of '{mcp_server_name}' MCP server to set configuration
+
+        repository_owner = {repository_owner}
+        repository_name = {repository_name}
+        service_name: {service_name}
+        
+    """
+
+@mcp.prompt()
+def step1_generate_typescript_dto() -> str:
+    """
+    Prompt to generate TypeScript module with DTOs for each data item used in service with service_name 
+    
+    Returns:
+        Prompt to process this request
+    """
+    return run_step1_generate_typescript_dto()
+
+def run_step1_generate_typescript_dto() -> str:
+    """
+    Prompt to generate TypeScript module with DTOs for each data item used in service with service_name 
+    
     Returns:
         Prompt to process this request
     """
     # Assumptions: 
     #     - test framework is built based on specific template, with approved structure
     #     - test framework already contains example for each layer of the test framework
+    service_name = app_context.service_name
+    owner = app_context.repository_owner
+    repo = app_context.repository_name
+    if (repo == ""):
+        return "Error: Repository name is not defined. Use step0_configure_flow to configure flow."
+    if (owner == ""):
+        return "Error: Repository owner is not defined. Use step0_configure_flow to configure flow."
+    if (service_name == ""):
+        return "Error: Service name is not defined. Use step0_configure_flow to configure flow."
+
     example_service_name = "wizardWorld"
     path_to_exapmpe_contract = "serviceContracts/wizardWorld.json"
     path_to_example_dto = "src/models/wizardWorld.model.ts"
-    owner = 'juliaviluhina'
-    repo = 'taf_rest_api_result'
+
     schema = ''
     example_schema = ''
-    if (service_name == ""):
-        return "Error: Please provide service name."
 
     try:
         schema = get_service_schemas(owner, repo, service_name)
@@ -77,9 +162,18 @@ def step1_generate_typescript_dto(
     6. Handle arrays, enums, and nested objects appropriately
     7. Return ONLY the TypeScript code, nothing else
     8. Return result to chat for user's review
+    9. Ask whether user would like to review and adjust module, or push changes to repository
+    10. For further push to repository, strictly follow steps: 
+        10.1. use 'github' tool, 
+        10.2. for repository '{owner}/{repo}, 
+        10.3. create branch dto_{service_name}, 
+        10.4. store prepared TypeScript module as src/models/{service_name}.model.ts
+        10.5. raise PR
+        10.6. inform user about result
     </guidelines>
         
     """
+
 
 if __name__ == "__main__":
     mcp.run()
