@@ -35,7 +35,6 @@ Create a `.env` file in your project directory with your GitHub personal access 
 
 ```
 GITHUB_TOKEN=your_github_personal_access_token
-ANTHROPIC_API_KEY=your_anthropic_api_key
 ```
 
 Make sure your token has appropriate permissions for the repositories you plan to access.
@@ -53,10 +52,10 @@ Add the MCP server configuration to your Claude desktop settings:
       "command": "bash",
       "args": [
         "-c",
-        "cd /path/to/swagger-dto-generator && source .venv/bin/activate && mcp run rest_api_taf_helper.py"
+        "cd /path/to/this-mcp-server-folder && source .venv/bin/activate && mcp run rest_api_taf_helper.py"
       ],
       "env": {
-            "GITHUB_TOKEN":"your_github_personal_access_token"
+            "GITHUB_TOKEN":"your_github_personal_access_token_with_access_to_taf_repo"
       }  
     }
   }
