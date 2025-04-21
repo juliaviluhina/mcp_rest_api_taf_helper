@@ -26,7 +26,7 @@ uv venv
 source .venv/bin/activate
 
 # Install dependencies
-uv add "mcp[cli]" pydantic
+uv add "mcp[cli]" pydantic pygithub
 ```
 
 ### 2. Configure GitHub Access
